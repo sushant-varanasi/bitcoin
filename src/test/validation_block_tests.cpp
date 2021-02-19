@@ -95,8 +95,8 @@ std::shared_ptr<CBlock> MinerTestingSetup::Block(const uint256& prev_hash)
 
 std::shared_ptr<CBlock> MinerTestingSetup::FinalizeBlock(std::shared_ptr<CBlock> pblock)
 {
-    LOCK(cs_main); // For LookupBlockIndex
-    GenerateCoinbaseCommitment(*pblock, LookupBlockIndex(pblock->hashPrevBlock), Params().GetConsensus());
+    LOCK(cs_main); // For g_chainman.m_blockman.LookupBlockIndex
+    GenerateCoinbaseCommitment(*pblock, g_chainman.m_blockman.LookupBlockIndex(pblock->hashPrevBlock), Params().GetConsensus());
 
     pblock->hashMerkleRoot = BlockMerkleRoot(*pblock);
 
@@ -283,15 +283,9 @@ BOOST_AUTO_TEST_CASE(mempool_locks_reorg)
         // Add the txs to the tx pool
         {
             LOCK(cs_main);
-            TxValidationState state;
-            std::list<CTransactionRef> plTxnReplaced;
             for (const auto& tx : txs) {
-                BOOST_REQUIRE(AcceptToMemoryPool(
-                    *m_node.mempool,
-                    state,
-                    tx,
-                    &plTxnReplaced,
-                    /* bypass_limits */ false));
+                const MempoolAcceptResult result = AcceptToMemoryPool(*m_node.mempool, tx, false /* bypass_limits */);
+                BOOST_REQUIRE(result.m_result_type == MempoolAcceptResult::ResultType::VALID);
             }
         }
 

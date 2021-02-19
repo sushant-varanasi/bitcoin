@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# Copyright (c) 2014-2019 The Bitcoin Core developers
+# Copyright (c) 2014-2020 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test the -alertnotify, -blocknotify and -walletnotify options."""
 import os
 
-from test_framework.address import ADDRESS_BCRT1_UNSPENDABLE, keyhash_to_p2pkh
+from test_framework.address import ADDRESS_BCRT1_UNSPENDABLE
+from test_framework.descriptors import descsum_create
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
-    hex_str_to_bytes,
 )
 
 # Linux allow all characters other than \x00
@@ -39,15 +39,41 @@ class NotificationsTest(BitcoinTestFramework):
 
         # -alertnotify and -blocknotify on node0, walletnotify on node1
         self.extra_args = [[
-                            "-alertnotify=echo > {}".format(os.path.join(self.alertnotify_dir, '%s')),
-                            "-blocknotify=echo > {}".format(os.path.join(self.blocknotify_dir, '%s'))],
-                           ["-blockversion=211",
-                            "-rescan",
-                            "-walletnotify=echo > {}".format(os.path.join(self.walletnotify_dir, notify_outputname('%w', '%s')))]]
+            "-alertnotify=echo > {}".format(os.path.join(self.alertnotify_dir, '%s')),
+            "-blocknotify=echo > {}".format(os.path.join(self.blocknotify_dir, '%s')),
+        ], [
+            "-rescan",
+            "-walletnotify=echo > {}".format(os.path.join(self.walletnotify_dir, notify_outputname('%w', '%s'))),
+        ]]
         self.wallet_names = [self.default_wallet_name, self.wallet]
         super().setup_network()
 
     def run_test(self):
+        if self.is_wallet_compiled():
+            # Setup the descriptors to be imported to the wallet
+            seed = "cTdGmKFWpbvpKQ7ejrdzqYT2hhjyb3GPHnLAK7wdi5Em67YLwSm9"
+            xpriv = "tprv8ZgxMBicQKsPfHCsTwkiM1KT56RXbGGTqvc2hgqzycpwbHqqpcajQeMRZoBD35kW4RtyCemu6j34Ku5DEspmgjKdt2qe4SvRch5Kk8B8A2v"
+            desc_imports = [{
+                "desc": descsum_create("wpkh(" + xpriv + "/0/*)"),
+                "timestamp": 0,
+                "active": True,
+                "keypool": True,
+            },{
+                "desc": descsum_create("wpkh(" + xpriv + "/1/*)"),
+                "timestamp": 0,
+                "active": True,
+                "keypool": True,
+                "internal": True,
+            }]
+            # Make the wallets and import the descriptors
+            # Ensures that node 0 and node 1 share the same wallet for the conflicting transaction tests below.
+            for i, name in enumerate(self.wallet_names):
+                self.nodes[i].createwallet(wallet_name=name, descriptors=self.options.descriptors, blank=True, load_on_startup=True)
+                if self.options.descriptors:
+                    self.nodes[i].importdescriptors(desc_imports)
+                else:
+                    self.nodes[i].sethdseed(True, seed)
+
         self.log.info("test -blocknotify")
         block_count = 10
         blocks = self.nodes[1].generatetoaddress(block_count, self.nodes[1].getnewaddress() if self.is_wallet_compiled() else ADDRESS_BCRT1_UNSPENDABLE)
@@ -83,11 +109,10 @@ class NotificationsTest(BitcoinTestFramework):
             for tx_file in os.listdir(self.walletnotify_dir):
                 os.remove(os.path.join(self.walletnotify_dir, tx_file))
 
-            # Conflicting transactions tests. Give node 0 same wallet seed as
-            # node 1, generate spends from node 0, and check notifications
+            # Conflicting transactions tests.
+            # Generate spends from node 0, and check notifications
             # triggered by node 1
             self.log.info("test -walletnotify with conflicting transactions")
-            self.nodes[0].sethdseed(seed=self.nodes[1].dumpprivkey(keyhash_to_p2pkh(hex_str_to_bytes(self.nodes[1].getwalletinfo()['hdseedid'])[::-1])))
             self.nodes[0].rescanblockchain()
             self.nodes[0].generatetoaddress(100, ADDRESS_BCRT1_UNSPENDABLE)
             self.sync_blocks()

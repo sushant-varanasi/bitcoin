@@ -934,9 +934,9 @@ static std::string RecurseImportData(const CScript& script, ImportData& import_d
     case TxoutType::NONSTANDARD:
     case TxoutType::WITNESS_UNKNOWN:
     case TxoutType::WITNESS_V1_TAPROOT:
-    default:
         return "unrecognized script";
-    }
+    } // no default case, so the compiler can warn about missing cases
+    CHECK_NONFATAL(false);
 }
 
 static UniValue ProcessImportLegacy(ImportData& import_data, std::map<CKeyID, CPubKey>& pubkey_map, std::map<CKeyID, CKey>& privkey_map, std::set<CScript>& script_pub_keys, bool& have_solving_data, const UniValue& data, std::vector<CKeyID>& ordered_pubkeys)
@@ -1523,7 +1523,9 @@ static UniValue ProcessDescriptorImport(CWallet * const pwallet, const UniValue&
         // Need to ExpandPrivate to check if private keys are available for all pubkeys
         FlatSigningProvider expand_keys;
         std::vector<CScript> scripts;
-        parsed_desc->Expand(0, keys, scripts, expand_keys);
+        if (!parsed_desc->Expand(0, keys, scripts, expand_keys)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "Cannot expand descriptor. Probably because of hardened derivations without private keys provided");
+        }
         parsed_desc->ExpandPrivate(0, keys, expand_keys);
 
         // Check if all private keys are provided
@@ -1559,7 +1561,7 @@ static UniValue ProcessDescriptorImport(CWallet * const pwallet, const UniValue&
         }
 
         // Add descriptor to the wallet
-        auto spk_manager = pwallet->AddWalletDescriptor(w_desc, keys, label);
+        auto spk_manager = pwallet->AddWalletDescriptor(w_desc, keys, label, internal);
         if (spk_manager == nullptr) {
             throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Could not add descriptor '%s'", descriptor));
         }
@@ -1732,6 +1734,75 @@ RPCHelpMan importdescriptors()
                 }
             }
         }
+    }
+
+    return response;
+},
+    };
+}
+
+RPCHelpMan listdescriptors()
+{
+    return RPCHelpMan{
+        "listdescriptors",
+        "\nList descriptors imported into a descriptor-enabled wallet.",
+        {},
+        RPCResult{
+            RPCResult::Type::ARR, "", "Response is an array of descriptor objects",
+            {
+                {RPCResult::Type::OBJ, "", "", {
+                    {RPCResult::Type::STR, "desc", "Descriptor string representation"},
+                    {RPCResult::Type::NUM, "timestamp", "The creation time of the descriptor"},
+                    {RPCResult::Type::BOOL, "active", "Activeness flag"},
+                    {RPCResult::Type::BOOL, "internal", true, "Whether this is internal or external descriptor; defined only for active descriptors"},
+                    {RPCResult::Type::ARR_FIXED, "range", true, "Defined only for ranged descriptors", {
+                        {RPCResult::Type::NUM, "", "Range start inclusive"},
+                        {RPCResult::Type::NUM, "", "Range end inclusive"},
+                    }},
+                    {RPCResult::Type::NUM, "next", true, "The next index to generate addresses from; defined only for ranged descriptors"},
+                }},
+            }
+        },
+        RPCExamples{
+            HelpExampleCli("listdescriptors", "") + HelpExampleRpc("listdescriptors", "")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    std::shared_ptr<CWallet> const wallet = GetWalletForJSONRPCRequest(request);
+    if (!wallet) return NullUniValue;
+
+    if (!wallet->IsWalletFlagSet(WALLET_FLAG_DESCRIPTORS)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "listdescriptors is not available for non-descriptor wallets");
+    }
+
+    LOCK(wallet->cs_wallet);
+
+    UniValue response(UniValue::VARR);
+    const auto active_spk_mans = wallet->GetActiveScriptPubKeyMans();
+    for (const auto& spk_man : wallet->GetAllScriptPubKeyMans()) {
+        const auto desc_spk_man = dynamic_cast<DescriptorScriptPubKeyMan*>(spk_man);
+        if (!desc_spk_man) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "Unexpected ScriptPubKey manager type.");
+        }
+        UniValue spk(UniValue::VOBJ);
+        LOCK(desc_spk_man->cs_desc_man);
+        const auto& wallet_descriptor = desc_spk_man->GetWalletDescriptor();
+        spk.pushKV("desc", wallet_descriptor.descriptor->ToString());
+        spk.pushKV("timestamp", wallet_descriptor.creation_time);
+        const bool active = active_spk_mans.count(desc_spk_man) != 0;
+        spk.pushKV("active", active);
+        const auto& type = wallet_descriptor.descriptor->GetOutputType();
+        if (active && type != nullopt) {
+            spk.pushKV("internal", wallet->GetScriptPubKeyMan(*type, true) == desc_spk_man);
+        }
+        if (wallet_descriptor.descriptor->IsRange()) {
+            UniValue range(UniValue::VARR);
+            range.push_back(wallet_descriptor.range_start);
+            range.push_back(wallet_descriptor.range_end - 1);
+            spk.pushKV("range", range);
+            spk.pushKV("next", wallet_descriptor.next_index);
+        }
+        response.push_back(spk);
     }
 
     return response;

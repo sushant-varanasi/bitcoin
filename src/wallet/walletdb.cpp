@@ -14,8 +14,12 @@
 #include <util/system.h>
 #include <util/time.h>
 #include <util/translation.h>
+#ifdef USE_BDB
 #include <wallet/bdb.h>
+#endif
+#ifdef USE_SQLITE
 #include <wallet/sqlite.h>
+#endif
 #include <wallet/wallet.h>
 
 #include <atomic>
@@ -360,7 +364,7 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
             {
                 ssValue >> hash;
             }
-            catch (...) {}
+            catch (const std::ios_base::failure&) {}
 
             bool fSkipCheck = false;
 
@@ -422,7 +426,7 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
                 uint256 checksum;
                 ssValue >> checksum;
                 if ((checksum_valid = Hash(vchPrivKey) != checksum)) {
-                    strErr = "Error reading wallet database: Crypted key corrupt";
+                    strErr = "Error reading wallet database: Encrypted key corrupt";
                     return false;
                 }
             }
@@ -547,13 +551,6 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
             CHDChain chain;
             ssValue >> chain;
             pwallet->GetOrCreateLegacyScriptPubKeyMan()->LoadHDChain(chain);
-        } else if (strType == DBKeys::FLAGS) {
-            uint64_t flags;
-            ssValue >> flags;
-            if (!pwallet->LoadWalletFlags(flags)) {
-                strErr = "Error reading wallet database: Unknown non-tolerable wallet flags found";
-                return false;
-            }
         } else if (strType == DBKeys::OLD_KEY) {
             strErr = "Found unsupported 'wkey' record, try loading with version 0.18";
             return false;
@@ -658,7 +655,8 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
             wss.fIsEncrypted = true;
         } else if (strType != DBKeys::BESTBLOCK && strType != DBKeys::BESTBLOCK_NOMERKLE &&
                    strType != DBKeys::MINVERSION && strType != DBKeys::ACENTRY &&
-                   strType != DBKeys::VERSION && strType != DBKeys::SETTINGS) {
+                   strType != DBKeys::VERSION && strType != DBKeys::SETTINGS &&
+                   strType != DBKeys::FLAGS) {
             wss.m_unknown_records++;
         }
     } catch (const std::exception& e) {
@@ -701,6 +699,16 @@ DBErrors WalletBatch::LoadWallet(CWallet* pwallet)
             if (nMinVersion > FEATURE_LATEST)
                 return DBErrors::TOO_NEW;
             pwallet->LoadMinVersion(nMinVersion);
+        }
+
+        // Load wallet flags, so they are known when processing other records.
+        // The FLAGS key is absent during wallet creation.
+        uint64_t flags;
+        if (m_batch->Read(DBKeys::FLAGS, flags)) {
+            if (!pwallet->LoadWalletFlags(flags)) {
+                pwallet->WalletLogPrintf("Error reading wallet database: Unknown non-tolerable wallet flags found\n");
+                return DBErrors::CORRUPT;
+            }
         }
 
         // Get cursor
@@ -941,7 +949,7 @@ void MaybeCompactWalletDB()
     }
 
     for (const std::shared_ptr<CWallet>& pwallet : GetWallets()) {
-        WalletDatabase& dbh = pwallet->GetDBHandle();
+        WalletDatabase& dbh = pwallet->GetDatabase();
 
         unsigned int nUpdateCounter = dbh.nUpdateCounter;
 
@@ -1009,10 +1017,10 @@ std::unique_ptr<WalletDatabase> MakeDatabase(const fs::path& path, const Databas
 
     Optional<DatabaseFormat> format;
     if (exists) {
-        if (ExistsBerkeleyDatabase(path)) {
+        if (IsBDBFile(BDBDataFile(path))) {
             format = DatabaseFormat::BERKELEY;
         }
-        if (ExistsSQLiteDatabase(path)) {
+        if (IsSQLiteFile(SQLiteDataFile(path))) {
             if (format) {
                 error = Untranslated(strprintf("Failed to load database path '%s'. Data is in ambiguous format.", path.string()));
                 status = DatabaseStatus::FAILED_BAD_FORMAT;
@@ -1048,11 +1056,31 @@ std::unique_ptr<WalletDatabase> MakeDatabase(const fs::path& path, const Databas
     // Format is not set when a db doesn't already exist, so use the format specified by the options if it is set.
     if (!format && options.require_format) format = options.require_format;
 
-    if (format && format == DatabaseFormat::SQLITE) {
-        return MakeSQLiteDatabase(path, options, status, error);
+    // If the format is not specified or detected, choose the default format based on what is available. We prefer BDB over SQLite for now.
+    if (!format) {
+#ifdef USE_SQLITE
+        format = DatabaseFormat::SQLITE;
+#endif
+#ifdef USE_BDB
+        format = DatabaseFormat::BERKELEY;
+#endif
     }
 
+    if (format == DatabaseFormat::SQLITE) {
+#ifdef USE_SQLITE
+        return MakeSQLiteDatabase(path, options, status, error);
+#endif
+        error = Untranslated(strprintf("Failed to open database path '%s'. Build does not support SQLite database format.", path.string()));
+        status = DatabaseStatus::FAILED_BAD_FORMAT;
+        return nullptr;
+    }
+
+#ifdef USE_BDB
     return MakeBerkeleyDatabase(path, options, status, error);
+#endif
+    error = Untranslated(strprintf("Failed to open database path '%s'. Build does not support Berkeley DB database format.", path.string()));
+    status = DatabaseStatus::FAILED_BAD_FORMAT;
+    return nullptr;
 }
 
 /** Return object for accessing dummy database with no read/write capabilities. */
@@ -1064,5 +1092,9 @@ std::unique_ptr<WalletDatabase> CreateDummyWalletDatabase()
 /** Return object for accessing temporary in-memory database. */
 std::unique_ptr<WalletDatabase> CreateMockWalletDatabase()
 {
+#ifdef USE_BDB
     return MakeUnique<BerkeleyDatabase>(std::make_shared<BerkeleyEnvironment>(), "");
+#elif USE_SQLITE
+    return MakeUnique<SQLiteDatabase>("", "", true);
+#endif
 }

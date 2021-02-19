@@ -29,14 +29,14 @@
  * Make sure that this does not collide with any of the values in `version.h`
  * or with `SERIALIZE_TRANSACTION_NO_WITNESS`.
  */
-static const int ADDRV2_FORMAT = 0x20000000;
+static constexpr int ADDRV2_FORMAT = 0x20000000;
 
 /**
  * A network type.
  * @note An address may belong to more than one network, for example `10.0.0.1`
  * belongs to both `NET_UNROUTABLE` and `NET_IPV4`.
  * Keep these sequential starting from 0 and `NET_MAX` as the last entry.
- * We have loops like `for (int i = 0; i < NET_MAX; i++)` that expect to iterate
+ * We have loops like `for (int i = 0; i < NET_MAX; ++i)` that expect to iterate
  * over all enum values and also `GetExtNetwork()` "extends" this enum by
  * introducing standalone constants starting from `NET_MAX`.
  */
@@ -462,11 +462,33 @@ class CSubNet
         bool SanityCheck() const;
 
     public:
+        /**
+         * Construct an invalid subnet (empty, `Match()` always returns false).
+         */
         CSubNet();
+
+        /**
+         * Construct from a given network start and number of bits (CIDR mask).
+         * @param[in] addr Network start. Must be IPv4 or IPv6, otherwise an invalid subnet is
+         * created.
+         * @param[in] mask CIDR mask, must be in [0, 32] for IPv4 addresses and in [0, 128] for
+         * IPv6 addresses. Otherwise an invalid subnet is created.
+         */
         CSubNet(const CNetAddr& addr, uint8_t mask);
+
+        /**
+         * Construct from a given network start and mask.
+         * @param[in] addr Network start. Must be IPv4 or IPv6, otherwise an invalid subnet is
+         * created.
+         * @param[in] mask Network mask, must be of the same type as `addr` and not contain 0-bits
+         * followed by 1-bits. Otherwise an invalid subnet is created.
+         */
         CSubNet(const CNetAddr& addr, const CNetAddr& mask);
 
-        //constructor for single ip subnet (<ipv4>/32 or <ipv6>/128)
+        /**
+         * Construct a single-host subnet.
+         * @param[in] addr The sole address to be contained in the subnet, can also be non-IPv[46].
+         */
         explicit CSubNet(const CNetAddr& addr);
 
         bool Match(const CNetAddr &addr) const;
@@ -483,7 +505,7 @@ class CSubNet
             READWRITE(obj.network);
             if (obj.network.IsIPv4()) {
                 // Before commit 102867c587f5f7954232fb8ed8e85cda78bb4d32, CSubNet used the last 4 bytes of netmask
-                // to store the relevant bytes for an IPv4 mask. For compatiblity reasons, keep doing so in
+                // to store the relevant bytes for an IPv4 mask. For compatibility reasons, keep doing so in
                 // serialized form.
                 unsigned char dummy[12] = {0};
                 READWRITE(dummy);

@@ -5,13 +5,16 @@
 """Test the send RPC command."""
 
 from decimal import Decimal, getcontext
+from itertools import product
+
 from test_framework.authproxy import JSONRPCException
+from test_framework.descriptors import descsum_create
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
     assert_fee_amount,
     assert_greater_than,
-    assert_raises_rpc_error
+    assert_raises_rpc_error,
 )
 
 class WalletSendTest(BitcoinTestFramework):
@@ -28,8 +31,8 @@ class WalletSendTest(BitcoinTestFramework):
         self.skip_if_no_wallet()
 
     def test_send(self, from_wallet, to_wallet=None, amount=None, data=None,
-                  arg_conf_target=None, arg_estimate_mode=None,
-                  conf_target=None, estimate_mode=None, add_to_wallet=None, psbt=None,
+                  arg_conf_target=None, arg_estimate_mode=None, arg_fee_rate=None,
+                  conf_target=None, estimate_mode=None, fee_rate=None, add_to_wallet=None, psbt=None,
                   inputs=None, add_inputs=None, change_address=None, change_position=None, change_type=None,
                   include_watching=None, locktime=None, lock_unspents=None, replaceable=None, subtract_fee_from_outputs=None,
                   expect_error=None):
@@ -62,6 +65,8 @@ class WalletSendTest(BitcoinTestFramework):
             options["conf_target"] = conf_target
         if estimate_mode is not None:
             options["estimate_mode"] = estimate_mode
+        if fee_rate is not None:
+            options["fee_rate"] = fee_rate
         if inputs is not None:
             options["inputs"] = inputs
         if add_inputs is not None:
@@ -89,16 +94,19 @@ class WalletSendTest(BitcoinTestFramework):
             options = None
 
         if expect_error is None:
-            res = from_wallet.send(outputs=outputs, conf_target=arg_conf_target, estimate_mode=arg_estimate_mode, options=options)
+            res = from_wallet.send(outputs=outputs, conf_target=arg_conf_target, estimate_mode=arg_estimate_mode, fee_rate=arg_fee_rate, options=options)
         else:
             try:
                 assert_raises_rpc_error(expect_error[0], expect_error[1], from_wallet.send,
-                                        outputs=outputs, conf_target=arg_conf_target, estimate_mode=arg_estimate_mode, options=options)
+                    outputs=outputs, conf_target=arg_conf_target, estimate_mode=arg_estimate_mode, fee_rate=arg_fee_rate, options=options)
             except AssertionError:
                 # Provide debug info if the test fails
                 self.log.error("Unexpected successful result:")
+                self.log.error(arg_conf_target)
+                self.log.error(arg_estimate_mode)
+                self.log.error(arg_fee_rate)
                 self.log.error(options)
-                res = from_wallet.send(outputs=outputs, conf_target=arg_conf_target, estimate_mode=arg_estimate_mode, options=options)
+                res = from_wallet.send(outputs=outputs, conf_target=arg_conf_target, estimate_mode=arg_estimate_mode, fee_rate=arg_fee_rate, options=options)
                 self.log.error(res)
                 if "txid" in res and add_to_wallet:
                     self.log.error("Transaction details:")
@@ -161,48 +169,90 @@ class WalletSendTest(BitcoinTestFramework):
         self.nodes[1].createwallet(wallet_name="w1")
         w1 = self.nodes[1].get_wallet_rpc("w1")
         # w2 contains the private keys for w3
-        self.nodes[1].createwallet(wallet_name="w2")
+        self.nodes[1].createwallet(wallet_name="w2", blank=True)
         w2 = self.nodes[1].get_wallet_rpc("w2")
+        xpriv = "tprv8ZgxMBicQKsPfHCsTwkiM1KT56RXbGGTqvc2hgqzycpwbHqqpcajQeMRZoBD35kW4RtyCemu6j34Ku5DEspmgjKdt2qe4SvRch5Kk8B8A2v"
+        xpub = "tpubD6NzVbkrYhZ4YkEfMbRJkQyZe7wTkbTNRECozCtJPtdLRn6cT1QKb8yHjwAPcAr26eHBFYs5iLiFFnCbwPRsncCKUKCfubHDMGKzMVcN1Jg"
+        if self.options.descriptors:
+            w2.importdescriptors([{
+                "desc": descsum_create("wpkh(" + xpriv + "/0/0/*)"),
+                "timestamp": "now",
+                "range": [0, 100],
+                "active": True
+            },{
+                "desc": descsum_create("wpkh(" + xpriv + "/0/1/*)"),
+                "timestamp": "now",
+                "range": [0, 100],
+                "active": True,
+                "internal": True
+            }])
+        else:
+            w2.sethdseed(True)
+
         # w3 is a watch-only wallet, based on w2
         self.nodes[1].createwallet(wallet_name="w3", disable_private_keys=True)
         w3 = self.nodes[1].get_wallet_rpc("w3")
-        for _ in range(3):
-            a2_receive = w2.getnewaddress()
-            a2_change = w2.getrawchangeaddress() # doesn't actually use change derivation
-            res = w3.importmulti([{
-                "desc": w2.getaddressinfo(a2_receive)["desc"],
+        if self.options.descriptors:
+            # Match the privkeys in w2 for descriptors
+            res = w3.importdescriptors([{
+                "desc": descsum_create("wpkh(" + xpub + "/0/0/*)"),
                 "timestamp": "now",
+                "range": [0, 100],
                 "keypool": True,
+                "active": True,
                 "watchonly": True
             },{
-                "desc": w2.getaddressinfo(a2_change)["desc"],
+                "desc": descsum_create("wpkh(" + xpub + "/0/1/*)"),
                 "timestamp": "now",
+                "range": [0, 100],
                 "keypool": True,
+                "active": True,
                 "internal": True,
                 "watchonly": True
             }])
             assert_equal(res, [{"success": True}, {"success": True}])
 
+        for _ in range(3):
+            a2_receive = w2.getnewaddress()
+            if not self.options.descriptors:
+                # Because legacy wallets use exclusively hardened derivation, we can't do a ranged import like we do for descriptors
+                a2_change = w2.getrawchangeaddress() # doesn't actually use change derivation
+                res = w3.importmulti([{
+                    "desc": w2.getaddressinfo(a2_receive)["desc"],
+                    "timestamp": "now",
+                    "keypool": True,
+                    "watchonly": True
+                },{
+                    "desc": w2.getaddressinfo(a2_change)["desc"],
+                    "timestamp": "now",
+                    "keypool": True,
+                    "internal": True,
+                    "watchonly": True
+                }])
+                assert_equal(res, [{"success": True}, {"success": True}])
+
         w0.sendtoaddress(a2_receive, 10) # fund w3
         self.nodes[0].generate(1)
         self.sync_blocks()
 
-        # w4 has private keys enabled, but only contains watch-only keys (from w2)
-        self.nodes[1].createwallet(wallet_name="w4", disable_private_keys=False)
-        w4 = self.nodes[1].get_wallet_rpc("w4")
-        for _ in range(3):
-            a2_receive = w2.getnewaddress()
-            res = w4.importmulti([{
-                "desc": w2.getaddressinfo(a2_receive)["desc"],
-                "timestamp": "now",
-                "keypool": False,
-                "watchonly": True
-            }])
-            assert_equal(res, [{"success": True}])
+        if not self.options.descriptors:
+            # w4 has private keys enabled, but only contains watch-only keys (from w2)
+            # This is legacy wallet behavior only as descriptor wallets don't allow watchonly and non-watchonly things in the same wallet.
+            self.nodes[1].createwallet(wallet_name="w4", disable_private_keys=False)
+            w4 = self.nodes[1].get_wallet_rpc("w4")
+            for _ in range(3):
+                a2_receive = w2.getnewaddress()
+                res = w4.importmulti([{
+                    "desc": w2.getaddressinfo(a2_receive)["desc"],
+                    "timestamp": "now",
+                    "keypool": False,
+                    "watchonly": True
+                }])
+                assert_equal(res, [{"success": True}])
 
-        w0.sendtoaddress(a2_receive, 10) # fund w4
-        self.nodes[0].generate(1)
-        self.sync_blocks()
+            w0.sendtoaddress(a2_receive, 10) # fund w4
+            self.nodes[0].generate(1)
+            self.sync_blocks()
 
         self.log.info("Send to address...")
         self.test_send(from_wallet=w0, to_wallet=w1, amount=1)
@@ -224,19 +274,25 @@ class WalletSendTest(BitcoinTestFramework):
         assert_equal(self.nodes[1].decodepsbt(res1["psbt"])["fee"],
                      self.nodes[1].decodepsbt(res2["psbt"])["fee"])
         # but not at the same time
-        self.test_send(from_wallet=w0, to_wallet=w1, amount=1, arg_conf_target=1, arg_estimate_mode="economical",
-                       conf_target=1, estimate_mode="economical", add_to_wallet=False, expect_error=(-8,"Use either conf_target and estimate_mode or the options dictionary to control fee rate"))
+        for mode in ["unset", "economical", "conservative"]:
+            self.test_send(from_wallet=w0, to_wallet=w1, amount=1, arg_conf_target=1, arg_estimate_mode="economical",
+                conf_target=1, estimate_mode=mode, add_to_wallet=False,
+                expect_error=(-8, "Pass conf_target and estimate_mode either as arguments or in the options object, but not both"))
 
         self.log.info("Create PSBT from watch-only wallet w3, sign with w2...")
         res = self.test_send(from_wallet=w3, to_wallet=w1, amount=1)
         res = w2.walletprocesspsbt(res["psbt"])
         assert res["complete"]
 
-        self.log.info("Create PSBT from wallet w4 with watch-only keys, sign with w2...")
-        self.test_send(from_wallet=w4, to_wallet=w1, amount=1, expect_error=(-4, "Insufficient funds"))
-        res = self.test_send(from_wallet=w4, to_wallet=w1, amount=1, include_watching=True, add_to_wallet=False)
-        res = w2.walletprocesspsbt(res["psbt"])
-        assert res["complete"]
+        if not self.options.descriptors:
+            # Descriptor wallets do not allow mixed watch-only and non-watch-only things in the same wallet.
+            # This is specifically testing that w4 ignores its own private keys and creates a psbt with send
+            # which is not something that needs to be tested in descriptor wallets.
+            self.log.info("Create PSBT from wallet w4 with watch-only keys, sign with w2...")
+            self.test_send(from_wallet=w4, to_wallet=w1, amount=1, expect_error=(-4, "Insufficient funds"))
+            res = self.test_send(from_wallet=w4, to_wallet=w1, amount=1, include_watching=True, add_to_wallet=False)
+            res = w2.walletprocesspsbt(res["psbt"])
+            assert res["complete"]
 
         self.log.info("Create OP_RETURN...")
         self.test_send(from_wallet=w0, to_wallet=w1, amount=1)
@@ -246,19 +302,63 @@ class WalletSendTest(BitcoinTestFramework):
         res = w2.walletprocesspsbt(res["psbt"])
         assert res["complete"]
 
-        self.log.info("Set fee rate...")
-        res = self.test_send(from_wallet=w0, to_wallet=w1, amount=1, conf_target=2, estimate_mode="sat/b", add_to_wallet=False)
+        self.log.info("Test setting explicit fee rate")
+        res1 = self.test_send(from_wallet=w0, to_wallet=w1, amount=1, arg_fee_rate="1", add_to_wallet=False)
+        res2 = self.test_send(from_wallet=w0, to_wallet=w1, amount=1, fee_rate="1", add_to_wallet=False)
+        assert_equal(self.nodes[1].decodepsbt(res1["psbt"])["fee"], self.nodes[1].decodepsbt(res2["psbt"])["fee"])
+
+        res = self.test_send(from_wallet=w0, to_wallet=w1, amount=1, fee_rate=7, add_to_wallet=False)
+        fee = self.nodes[1].decodepsbt(res["psbt"])["fee"]
+        assert_fee_amount(fee, Decimal(len(res["hex"]) / 2), Decimal("0.00007"))
+
+        # "unset" and None are treated the same for estimate_mode
+        res = self.test_send(from_wallet=w0, to_wallet=w1, amount=1, fee_rate=2, estimate_mode="unset", add_to_wallet=False)
         fee = self.nodes[1].decodepsbt(res["psbt"])["fee"]
         assert_fee_amount(fee, Decimal(len(res["hex"]) / 2), Decimal("0.00002"))
-        self.test_send(from_wallet=w0, to_wallet=w1, amount=1, conf_target=-1, estimate_mode="sat/b",
-                       expect_error=(-3, "Amount out of range"))
-        # Fee rate of 0.1 satoshi per byte should throw an error
-        # TODO: error should use sat/b
-        self.test_send(from_wallet=w0, to_wallet=w1, amount=1, conf_target=0.1, estimate_mode="sat/b",
-                       expect_error=(-4, "Fee rate (0.00000100 BTC/kB) is lower than the minimum fee rate setting (0.00001000 BTC/kB)"))
 
-        self.test_send(from_wallet=w0, to_wallet=w1, amount=1, conf_target=0.000001, estimate_mode="BTC/KB",
-                       expect_error=(-4, "Fee rate (0.00000100 BTC/kB) is lower than the minimum fee rate setting (0.00001000 BTC/kB)"))
+        res = self.test_send(from_wallet=w0, to_wallet=w1, amount=1, arg_fee_rate=4.531, add_to_wallet=False)
+        fee = self.nodes[1].decodepsbt(res["psbt"])["fee"]
+        assert_fee_amount(fee, Decimal(len(res["hex"]) / 2), Decimal("0.00004531"))
+
+        res = self.test_send(from_wallet=w0, to_wallet=w1, amount=1, arg_fee_rate=3, add_to_wallet=False)
+        fee = self.nodes[1].decodepsbt(res["psbt"])["fee"]
+        assert_fee_amount(fee, Decimal(len(res["hex"]) / 2), Decimal("0.00003"))
+
+        # Test that passing fee_rate as both an argument and an option raises.
+        self.test_send(from_wallet=w0, to_wallet=w1, amount=1, arg_fee_rate=1, fee_rate=1, add_to_wallet=False,
+                       expect_error=(-8, "Pass the fee_rate either as an argument, or in the options object, but not both"))
+
+        assert_raises_rpc_error(-8, "Use fee_rate (sat/vB) instead of feeRate", w0.send, {w1.getnewaddress(): 1}, 6, "conservative", 1, {"feeRate": 0.01})
+
+        assert_raises_rpc_error(-3, "Unexpected key totalFee", w0.send, {w1.getnewaddress(): 1}, 6, "conservative", 1, {"totalFee": 0.01})
+
+        for target, mode in product([-1, 0, 1009], ["economical", "conservative"]):
+            self.test_send(from_wallet=w0, to_wallet=w1, amount=1, conf_target=target, estimate_mode=mode,
+                expect_error=(-8, "Invalid conf_target, must be between 1 and 1008"))  # max value of 1008 per src/policy/fees.h
+        msg = 'Invalid estimate_mode parameter, must be one of: "unset", "economical", "conservative"'
+        for target, mode in product([-1, 0], ["btc/kb", "sat/b"]):
+            self.test_send(from_wallet=w0, to_wallet=w1, amount=1, conf_target=target, estimate_mode=mode, expect_error=(-8, msg))
+        for mode in ["", "foo", Decimal("3.141592")]:
+            self.test_send(from_wallet=w0, to_wallet=w1, amount=1, conf_target=0.1, estimate_mode=mode, expect_error=(-8, msg))
+            self.test_send(from_wallet=w0, to_wallet=w1, amount=1, arg_conf_target=0.1, arg_estimate_mode=mode, expect_error=(-8, msg))
+            assert_raises_rpc_error(-8, msg, w0.send, {w1.getnewaddress(): 1}, 0.1, mode)
+
+        for mode in ["economical", "conservative", "btc/kb", "sat/b"]:
+            self.log.debug("{}".format(mode))
+            for k, v in {"string": "true", "object": {"foo": "bar"}}.items():
+                self.test_send(from_wallet=w0, to_wallet=w1, amount=1, conf_target=v, estimate_mode=mode,
+                    expect_error=(-3, "Expected type number for conf_target, got {}".format(k)))
+
+        # Test setting explicit fee rate just below the minimum and at zero.
+        self.log.info("Explicit fee rate raises RPC error 'fee rate too low' if fee_rate of 0.99999999 is passed")
+        self.test_send(from_wallet=w0, to_wallet=w1, amount=1, fee_rate=0.99999999,
+            expect_error=(-4, "Fee rate (0.999 sat/vB) is lower than the minimum fee rate setting (1.000 sat/vB)"))
+        self.test_send(from_wallet=w0, to_wallet=w1, amount=1, arg_fee_rate=0.99999999,
+            expect_error=(-4, "Fee rate (0.999 sat/vB) is lower than the minimum fee rate setting (1.000 sat/vB)"))
+        self.test_send(from_wallet=w0, to_wallet=w1, amount=1, fee_rate=0,
+            expect_error=(-4, "Fee rate (0.000 sat/vB) is lower than the minimum fee rate setting (1.000 sat/vB)"))
+        self.test_send(from_wallet=w0, to_wallet=w1, amount=1, arg_fee_rate=0,
+            expect_error=(-4, "Fee rate (0.000 sat/vB) is lower than the minimum fee rate setting (1.000 sat/vB)"))
 
         # TODO: Return hex if fee rate is below -maxmempool
         # res = self.test_send(from_wallet=w0, to_wallet=w1, amount=1, conf_target=0.1, estimate_mode="sat/b", add_to_wallet=False)
