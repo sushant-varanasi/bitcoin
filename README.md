@@ -53,10 +53,11 @@ submit new unit tests for old code. Unit tests can be compiled and run
 and extending unit tests can be found in [/src/test/README.md](/src/test/README.md).
 
 There are also [regression and integration tests](/test), written
-in Python.
+in Python, that are run automatically on the build server.
 These tests can be run (if the [test dependencies](/test) are installed) with: `test/functional/test_runner.py`
 
-The [CI system](/ci) defines build configs for Windows, Linux, and macOS, unit/sanity tests are part of the CI configs.
+The CI (Continuous Integration) systems make sure that every pull request is built for Windows, Linux, and macOS,
+and that unit/sanity tests are run automatically.
 
 ### Manual Quality Assurance (QA) Testing
 
